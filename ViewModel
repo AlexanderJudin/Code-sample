@@ -1,0 +1,211 @@
+const val MAX_CERTIFICATE_LENGTH = 16
+
+@HiltViewModel
+internal class PaymentStepViewModel @Inject constructor(
+    private val onboardingRepository: OnboardingRepository,
+    private val analytics: PaymentStepAnalytics,
+    val savedStateHandle: SavedStateHandle,
+    private val jsonConverter: JsonConverter
+) : ViewModel() {
+
+    private val userCertificateContent = jsonConverter.fromJson<UserCertificateContentArg>(
+        checkNotNull(
+            savedStateHandle.get<String>(
+                PaymentStepNavigation.userContentCertificateArg
+            )
+        )
+    )
+
+    private val outputState = MutableSharedFlow<PaymentScreenEvents>(
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+
+    fun observeOutputState(): SharedFlow<PaymentScreenEvents> = outputState.asSharedFlow()
+
+    private val _stateUI = MutableStateFlow(initPaymentStepState())
+    val stateUI: StateFlow<PaymentStepStateUI> = _stateUI.asStateFlow()
+
+    val certificateCondition: (String) -> ValidationResult = {
+        when {
+            it.length < MAX_CERTIFICATE_LENGTH -> ValidationResult.Error(UIText.Resources(R.string.payment_step_input_error_count_numbers))
+            it.containsNotOnlyDigits() -> ValidationResult.Error(
+                UIText.Resources(
+                    UIStringAlias.input_error_incorrect_symbols
+                )
+            )
+
+            else -> ValidationResult.Success
+        }
+    }
+
+    fun onUIEvent(event: PaymentScreenUIEvents) {
+        val unused = when (event) {
+            PaymentScreenUIEvents.ActionButtonClick -> onButtonClick()
+            PaymentScreenUIEvents.BackClick -> outputState.tryEmit(PaymentScreenEvents.BackClick)
+            is PaymentScreenUIEvents.CertificateNumberChanged -> onCertificateNumberChanged(event.certificate)
+            is PaymentScreenUIEvents.PaymentMethodClick -> onPaymentMethodClick(event.paymentType)
+        }
+    }
+
+    private fun onButtonClick() {
+        val unused = when (_stateUI.value.selectedPayment) {
+            PaymentType.Certificate -> {
+                analytics.onSelectPaymentType(paymentType = PaymentType.Certificate.name)
+                when (_stateUI.value.certificateContentUI.certificateValidation) {
+                    ValidationResult.Success -> payWithCertificate()
+                    ValidationResult.None -> validateField()
+                    else -> {}
+                }
+            }
+
+            PaymentType.Requites -> {
+                analytics.onSelectPaymentType(paymentType = PaymentType.Requites.name)
+                outputState.tryEmit(PaymentScreenEvents.OpenRequisites)
+            }
+            PaymentType.Spb -> {
+                outputState.tryEmit(PaymentScreenEvents.SbpClick)
+            }
+        }
+    }
+
+    private fun onPaymentMethodClick(paymentState: PaymentType) {
+        _stateUI.value = _stateUI.value.copy(selectedPayment = paymentState)
+        if (paymentState == PaymentType.Requites) {
+            _stateUI.value = _stateUI.value.copy(
+                certificateContentUI = _stateUI.value.certificateContentUI.copy(
+                    certificateValidation = if (_stateUI.value.certificateContentUI.certificateValidation == ValidationResult.Success) _stateUI.value.certificateContentUI.certificateValidation else ValidationResult.None
+                )
+            )
+        }
+    }
+
+    private fun onCertificateNumberChanged(certificateNumber: String) {
+        if (certificateNumber.containsNotOnlyDigits()) {
+            return
+        }
+        if (certificateNumber != _stateUI.value.certificateContentUI.certificateNumber) {
+            _stateUI.value = _stateUI.value.copy(
+                certificateContentUI = _stateUI.value.certificateContentUI.copy(
+                    certificateNumber = certificateNumber,
+                    nominalSum = "",
+                    certificateValidation = ValidationResult.None
+                )
+            )
+            if (certificateNumber.length == MAX_CERTIFICATE_LENGTH) {
+                validateField()
+            }
+        }
+    }
+
+    private fun validateField() {
+        val validationResult =
+            certificateCondition(_stateUI.value.certificateContentUI.certificateNumber)
+        if (validationResult is ValidationResult.Success) {
+            validateCertificate()
+        } else {
+            _stateUI.value = _stateUI.value.copy(
+                certificateContentUI = _stateUI.value.certificateContentUI.copy(
+                    certificateValidation = validationResult
+                )
+            )
+        }
+    }
+
+    private fun validateCertificate() = viewModelScope.launch {
+        _stateUI.value = _stateUI.value.copy(
+            certificateContentUI = _stateUI.value.certificateContentUI.copy(
+                isLoading = true
+            )
+        )
+        val result = onboardingRepository.validateCertificate(
+            certId = _stateUI.value.certificateContentUI.certificateNumber,
+            contractNumber = userCertificateContent.orderId,
+            productId = userCertificateContent.productId,
+            lastName = userCertificateContent.lastName,
+            firstName = userCertificateContent.firstName,
+            middleName = userCertificateContent.middleName,
+            phone = userCertificateContent.phone,
+            email = userCertificateContent.email,
+            passport = userCertificateContent.passport,
+        )
+        val validationResult = handleCertificateValidationResponse(result)
+        _stateUI.value = _stateUI.value.copy(
+            certificateContentUI = _stateUI.value.certificateContentUI.copy(
+                isLoading = false, certificateValidation = validationResult
+            )
+        )
+    }
+
+    private fun handleCertificateValidationResponse(result: Result<CertificateValidationResponse>): ValidationResult {
+        return if (result is Result.Success) {
+            if (result.isCertificateValidationSucceed()) {
+                _stateUI.value = _stateUI.value.copy(
+                    certificateContentUI = _stateUI.value.certificateContentUI.copy(
+                        nominalSum = result.data.nominal.toPriceNoCurrencyUI()
+                    )
+                )
+                ValidationResult.Success
+            } else {
+                analytics.onServerErrorCertificateInput(result.data.errorMessage)
+                ValidationResult.Error(UIText.Text(result.data.errorMessage))
+            }
+        } else {
+            ValidationResult.Error(UIText.Resources(UIStringAlias.connection_error))
+        }
+    }
+
+    private fun Result.Success<CertificateValidationResponse>.isCertificateValidationSucceed() =
+        this.data.status == CERTIFICATE_VALIDATION_SUCCEED_STATUS && this.data.nominal > BigDecimal.ZERO && this.data.errorMessage.isEmpty()
+
+    private fun payWithCertificate() = viewModelScope.launch {
+        val result = onboardingRepository.payWithCertificate(
+            certId = _stateUI.value.certificateContentUI.certificateNumber,
+            contractNumber = userCertificateContent.orderId,
+            productId = userCertificateContent.productId,
+            lastName = userCertificateContent.lastName,
+            firstName = userCertificateContent.firstName,
+            middleName = userCertificateContent.middleName,
+            phone = userCertificateContent.phone,
+            email = userCertificateContent.email,
+            passport = userCertificateContent.passport
+        )
+        if (result is Result.Success) {
+            if (result.data) {
+                outputState.tryEmit(PaymentScreenEvents.SuccessPaymentByCertificate)
+            } else {
+                _stateUI.value = _stateUI.value.copy(
+                    certificateContentUI = _stateUI.value.certificateContentUI.copy(
+                        certificateValidation = ValidationResult.Error(UIText.Resources(R.string.payment_step_input_error_code_certificate))
+                    )
+                )
+            }
+        } else {
+            _stateUI.value = _stateUI.value.copy(
+                certificateContentUI = _stateUI.value.certificateContentUI.copy(
+                    certificateValidation = ValidationResult.Error(
+                        UIText.Resources(UIStringAlias.connection_error)
+                    )
+                )
+            )
+        }
+    }
+
+    private fun initPaymentStepState() = PaymentStepStateUI(
+        selectedPayment = PaymentType.Spb,
+        certificateContentUI = CertificateContentUI(
+            certificateNumber = "",
+            certificateValidation = ValidationResult.None,
+            nominalSum = "",
+            isLoading = false,
+        )
+    )
+
+    fun onOpenScreen() {
+        analytics.onOpenPaymentStepScreen()
+    }
+
+    companion object {
+        private const val CERTIFICATE_VALIDATION_SUCCEED_STATUS = 1
+    }
+}
