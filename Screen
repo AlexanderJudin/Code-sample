@@ -1,0 +1,255 @@
+private const val CONDITION_INVITATION_TAG = "conditionInvitationTag"
+
+@OptIn(ExperimentalLifecycleComposeApi::class)
+@Composable
+internal fun PaymentStepRoute(
+    onBackClick: () -> Unit,
+    onSbpClick: () -> Unit,
+    onCertificatePaymentSucceed: () -> Unit,
+    onRequisitesClick: () -> Unit,
+    viewModel: PaymentStepViewModel = hiltViewModel()
+) {
+
+    val stateUI by viewModel.stateUI.collectAsStateWithLifecycle()
+
+    BackHandler(onBack = onBackClick)
+
+    OneTimeLaunchedEffect { viewModel.onOpenScreen() }
+
+    ContextLaunchedEffect(block = {
+        viewModel.observeOutputState().collect {
+            val unused = when (it) {
+                PaymentScreenEvents.SbpClick -> onSbpClick()
+                PaymentScreenEvents.BackClick -> onBackClick()
+                PaymentScreenEvents.SuccessPaymentByCertificate -> onCertificatePaymentSucceed()
+                PaymentScreenEvents.OpenRequisites -> onRequisitesClick()
+            }
+        }
+    })
+
+    PaymentStepScreen(
+        viewModel::onUIEvent,
+        stateUI = stateUI
+    )
+}
+
+@Composable
+private fun PaymentStepScreen(
+    onUIEvents: (PaymentScreenUIEvents) -> Unit,
+    stateUI: PaymentStepStateUI,
+) {
+    val focusManager = LocalFocusManager.current
+
+    OnboardingTemplate(
+        toolbarContent = ToolbarContentUI(
+            onBackClick = {
+                onUIEvents(
+                    PaymentScreenUIEvents.BackClick
+                )
+            },
+            progress = OnboardingScreenProgress.PAYMENT,
+            icon = UIDrawableAlias.ic_arrow_left
+        ),
+        isFooterAboveIME = false,
+        content = {
+            Column(modifier = Modifier.fillMaxSize()) {
+                OnboardingHeader(title = stringResource(R.string.payment_step_title))
+                Spacer(modifier = Modifier.height(24.dp))
+                UIRadio(
+                    isSelected = stateUI.selectedPayment == PaymentType.Spb,
+                    title = stringResource(id = R.string.payment_step_sbp_title_row),
+                    description = stringResource(id = R.string.payment_step_sbp_description_row),
+                    icon = UIDrawableAlias.ic_sbp,
+                    onClick = { onUIEvents(PaymentScreenUIEvents.PaymentMethodClick(PaymentType.Spb)) }
+                )
+                Spacer(modifier = Modifier.height(24.dp))
+                UIRadio(
+                    isSelected = stateUI.selectedPayment == PaymentType.Requites,
+                    title = stringResource(id = R.string.payment_step_requisites_title_row),
+                    description = stringResource(id = R.string.payment_step_requisites_description_row),
+                    icon = UIDrawableAlias.ic_bank_details,
+                    onClick = { onUIEvents(PaymentScreenUIEvents.PaymentMethodClick(PaymentType.Requites)) },
+                )
+                Spacer(modifier = Modifier.height(24.dp))
+                UIRadio(
+                    isSelected = stateUI.selectedPayment == PaymentType.Certificate,
+                    title = stringResource(id = R.string.payment_step_certificate_title_row),
+                    description = stringResource(id = R.string.payment_step_certificate_description_row),
+                    icon = UIDrawableAlias.ic_certificate,
+                    onClick = { onUIEvents(PaymentScreenUIEvents.PaymentMethodClick(PaymentType.Certificate)) },
+                )
+                if (stateUI.selectedPayment == PaymentType.Certificate) {
+                    CertificatePaymentUI(
+                        certificateText = stateUI.certificateContentUI.certificateNumber,
+                        certificateValidation = stateUI.certificateContentUI.certificateValidation,
+                        onCertificateChanged = {
+                            onUIEvents(PaymentScreenUIEvents.CertificateNumberChanged(it))
+                        },
+                        nominalSum = stateUI.certificateContentUI.nominalSum,
+                        isLoading = stateUI.certificateContentUI.isLoading,
+                        focusManager = focusManager
+                    )
+                }
+            }
+        }, footerContent = {
+            Column {
+                val noticeStringWithLinks = buildNoticeStringWithLink()
+                val uriHandler = LocalUriHandler.current
+
+                if (stateUI.certificateContentUI.nominalSum.isNotEmpty() && stateUI.selectedPayment == PaymentType.Certificate) {
+                    ClickableText(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        text = noticeStringWithLinks,
+                        onClick = {
+                            onLinkClick(
+                                uriHandler = uriHandler,
+                                noticeStringWithLinks = noticeStringWithLinks,
+                                tagId = it
+                            )
+                        },
+                        style = UITheme.typography.captionCondensed,
+                    )
+                }
+                val text = when (stateUI.selectedPayment) {
+                    PaymentType.Requites -> stringResource(id = R.string.payment_step_requisites_button_title)
+                    PaymentType.Certificate -> stringResource(id = R.string.payment_step_certificate_button_title)
+                    PaymentType.Spb -> stringResource(id = R.string.payment_step_sbp_button_title)
+                }
+                UIButtonsBrushColumn {
+                    val buttonState = UIButtonType.Text(text)
+                    UIGradientButton(
+                        state = buttonState,
+                        onClick = { onUIEvents(PaymentScreenUIEvents.ActionButtonClick) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        }
+    )
+}
+
+private fun onLinkClick(
+    uriHandler: UriHandler,
+    noticeStringWithLinks: AnnotatedString,
+    tagId: Int
+) {
+    val tags = setOf(CONDITION_INVITATION_TAG)
+    noticeStringWithLinks.getUri(tags = tags, tagId = tagId)?.let(uriHandler::openUri)
+}
+
+@Composable
+private fun CertificatePaymentUI(
+    certificateText: String,
+    certificateValidation: ValidationResult,
+    nominalSum: String,
+    isLoading: Boolean,
+    focusManager: FocusManager,
+    onCertificateChanged: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .imePadding()
+            .wrapContentHeight()
+            .padding(top = 10.dp)
+    ) {
+        UIIngosInput(
+            keyboardActions = KeyboardActions(onDone = {
+                focusManager.clearFocus()
+            }),
+            keyboardOptions = KeyboardOptions(
+                autoCorrect = false,
+                keyboardType = KeyboardType.Number,
+                imeAction = ImeAction.Done
+            ),
+            text = certificateText,
+            isLoading = isLoading,
+            validation = certificateValidation,
+            onTextChange = onCertificateChanged,
+            hint = stringResource(id = R.string.payment_step_certificate_input_hint),
+            visualTransformation = CertificateTransformation(
+                SpanStyle(color = UITheme.colors.secondary)
+            ),
+            isDefaultFocused = true,
+            trailingIcon = {
+                if (certificateValidation is ValidationResult.Success) {
+                    Icon(
+                        painter = painterResource(id = UIDrawableAlias.ic_apply),
+                        contentDescription = null,
+                        tint = UITheme.colors.primary
+                    )
+                }
+            },
+            validCharsFromPasteRegex = NUMBERS_VALID_CHARACTERS,
+            maskStrategy = MaskStrategy.MaskData(MaskSettings.certificateNumber)
+        )
+        Spacer(modifier = Modifier.height(24.dp))
+        if (nominalSum.isNotEmpty()) {
+            Row {
+                Text(
+                    text = stringResource(id = R.string.payment_step_certificate_nominal_title),
+                    style = UITheme.typography.body1,
+                    color = UITheme.colors.primary,
+                    modifier = Modifier.weight(1f, true)
+                )
+                Text(
+                    text = nominalSum,
+                    style = UITheme.typography.subtitle1,
+                    color = UITheme.colors.primary
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun buildNoticeStringWithLink() = buildAnnotatedString {
+
+    val fullNoticeString = stringResource(id = R.string.payment_step_certificate_notice)
+
+    val (conditionInvitationStartIndex, conditionInvitationEndIndex) = fullNoticeString.getStartAndEndIndexes(
+        stringResource(id = R.string.payment_step_certificate_conditions_invitation_link)
+    )
+
+    append(fullNoticeString)
+    addStyle(
+        style = SpanStyle(
+            color = UITheme.colors.secondary
+        ), start = 0, end = conditionInvitationStartIndex
+    )
+    addStyle(
+        style = SpanStyle(
+            color = UITheme.colors.accent
+        ), start = conditionInvitationStartIndex, end = conditionInvitationEndIndex
+    )
+    addStyle(
+        style = SpanStyle(
+            color = UITheme.colors.secondary
+        ), start = conditionInvitationEndIndex, end = fullNoticeString.length
+    )
+
+    addStringAnnotation(
+        tag = CONDITION_INVITATION_TAG,
+        annotation = stringResource(id = R.string.payment_step_certificate_conditions_invitation_url),
+        start = conditionInvitationStartIndex,
+        end = conditionInvitationEndIndex
+    )
+}
+
+@UIPreview
+@Composable
+private fun PreviewPaymentStepScreen() {
+    UITheme {
+        PaymentStepScreen(
+            onUIEvents = {},
+            stateUI = PaymentStepStateUI(
+                PaymentType.Spb,
+                certificateContentUI = CertificateContentUI(
+                    certificateNumber = "",
+                    certificateValidation = ValidationResult.None,
+                    "",
+                    isLoading = false,
+                )
+            )
+        )
+    }
+}
