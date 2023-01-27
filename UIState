@@ -1,0 +1,17 @@
+data class PaymentStepStateUI(
+    val selectedPayment: PaymentType,
+    val certificateContentUI: CertificateContentUI,
+)
+
+data class CertificateContentUI(
+    val certificateNumber: String,
+    val certificateValidation: ValidationResult,
+    val nominalSum: String,
+    val isLoading: Boolean,
+)
+
+enum class PaymentType {
+    Spb,
+    Requites,
+    Certificate,
+}
